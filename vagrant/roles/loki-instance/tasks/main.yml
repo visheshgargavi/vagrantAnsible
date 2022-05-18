@@ -1,0 +1,163 @@
+---
+# tasks file for loki-instance
+
+- name: Upgrade all apt packages
+  apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+
+- name: installing podman
+  apt:
+          name: podman
+          state: present
+
+- name: Creates directory 
+  file:
+    path: "{{ item }}"
+    state: directory
+  with_items:
+          - /containers
+          - /containers/run
+          - /containers/run/grafana
+          - /containers/run/grafana/etc
+          - /containers/run/grafana/etc/grafana
+          - /containers/run/grafana/etc/grafana/provisioning
+          - /containers/run/grafana/etc/grafana/provisioning/{datasources,plugins,notifiers,dashboards}
+          - /containers/run/grafana/var
+          - /containers/run/grafana/var/lib
+          - /containers/run/grafana/var/lib/grafana
+          - /containers/run/loki
+          - /containers/run/loki/etc
+          - /containers/run/loki/etc/loki
+          - /containers/run/loki/loki
+          - /etc/promtail
+
+- name: installing wget
+  apt:
+          name: wget
+          state: present  
+
+- name: copy grafana.ini to destination folder
+  copy:
+          src: grafana.ini
+          dest: /containers/run/grafana/etc/grafana/grafana.ini
+
+- name: change Ownership of /containers/run/grafana
+  file:
+          path: /containers/run/grafana
+          owner: '2012'
+
+- name: copying loki-local-config.yaml
+  copy:
+          src: loki-local-config.yaml
+          dest: /containers/run/loki/etc/loki/loki-local-config.yaml
+
+- name: change Ownership of /containers/run/loki
+  file:
+          path: /containers/run/loki
+          owner: '2013'
+
+- name: copying promtail
+  copy:
+          src: "promtail"
+          dest: /usr/local/bin/promtail
+
+- name: creating promtail user
+  user:
+          name: promtail
+          system: yes
+          state: present
+
+- name: user to run promtail
+  shell: "{{ item }}"
+  with_items:
+          - usermod -aG systemd-journal promtail
+
+- name: copy promtail-local-config.yaml
+  copy:
+        src: promtail-local-config.yaml
+        dest: /etc/promtail/promtail-local-config.yaml
+
+- name: to copy promtail.service
+  copy:
+        src: promtail.service
+        dest: /etc/systemd/system/promtail.service
+
+- name: Create a pod
+  containers.podman.podman_pod:
+    name: pod1
+    state: started
+    ports:
+            - "127.0.0.1:3000:3000/tcp"
+            - "127.0.0.1:3100:3100/tcp"
+
+- name: Create a grafana container
+  containers.podman.podman_container:
+    name: grafana
+    pod: pod1
+    image: docker.io/grafana/grafana
+    state: started
+    detach: yes
+    tty: yes
+    entrypoint: /bin/bash
+    restart_policy: on-failure
+    user: 2012
+    volume:
+            - "/containers/run/grafana/etc/grafana:/etc/grafana:Z"
+            - "/containers/run/grafana/var/lib/grafana:/var/lib/grafana:Z"
+
+- name: Create a loki container
+  containers.podman.podman_container:
+    name: loki
+    pod: pod1
+    image: docker.io/grafana/loki
+    state: started
+    detach: yes
+    user: 2013
+    restart_policy: on-failure
+    tty: yes
+    cpus: 1
+    command: "-config.file=/etc/loki/loki-local-config.yaml"
+    volume:
+            - '/containers/run/loki/loki:/loki:Z'
+            - '/containers/run/loki/etc/loki:/etc/loki:Z'
+
+- name: installing ngnix server
+  apt:
+          name: "{{ item }}"
+          state: present
+  with_items:
+          - nginx
+          - policycoreutils-python-utils
+          - net-tools
+          - firewalld
+
+- name: Restarting nginx service
+  service:
+          name: "nginx"
+          state: restarted
+          enabled: yes
+
+- name: firewall-cmd --add-service=xyz --permanent
+  firewalld:
+          service: "{{ item }}"
+          permanent: yes
+          state: present
+  with_items:
+          - http
+          - https
+
+- name: adding port to firewalld-cmd
+  firewalld:
+          port: 3100/tcp
+          permanent: yes
+          state: present
+
+- name: to reload firewall-cmd
+  firewalld:
+          state: reload
+
+- name: starting promtail service
+  service:
+          name: promtail
+          state: started
+          enabled: yes 
+
